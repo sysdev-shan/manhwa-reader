@@ -9,7 +9,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer, Header
 
-from source_api.sources.mangadex import MangaDexSource
+from source_api.sources.suwayomi import SuwayomiSource
 from core.downloader import Downloader
 from core.settings import Settings
 from ui.screens.home import HomeScreen
@@ -23,7 +23,7 @@ App {
 
 
 class ManhwaReaderApp(App):
-    """Terminal Manhwa / Manhua Reader — powered by MangaDex."""
+    """Terminal Manhwa / Manhua Reader — powered by Suwayomi / Keiyoushi extensions."""
 
     CSS = APP_CSS
 
@@ -36,12 +36,13 @@ class ManhwaReaderApp(App):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._source = MangaDexSource()
+        settings = Settings()
+        self._source = SuwayomiSource(base_url=settings.suwayomi_url)
         self._downloader = Downloader()
-        self._settings = Settings()
+        self._settings = settings
 
     @property
-    def source(self) -> MangaDexSource:
+    def source(self) -> SuwayomiSource:
         return self._source
 
     @property

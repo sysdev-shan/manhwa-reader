@@ -52,6 +52,10 @@ class SettingsScreen(Screen):
         yield Static("⚙  Settings", id="settings-header")
 
         with Vertical(classes="settings-row"):
+            yield Label("Suwayomi Server URL")
+            yield Input(value=s.suwayomi_url, id="inp-suwayomi-url")
+
+        with Vertical(classes="settings-row"):
             yield Label("Reading Direction")
             yield Select(
                 [("Left to Right", "ltr"), ("Right to Left", "rtl")],
@@ -100,11 +104,14 @@ class SettingsScreen(Screen):
 
     def _save(self) -> None:
         try:
+            suwayomi_url = self.query_one("#inp-suwayomi-url", Input).value
             direction = self.query_one("#sel-direction", Select).value
             mode = self.query_one("#sel-mode", Select).value
             quality = self.query_one("#sel-quality", Select).value
             dl_path = self.query_one("#inp-dl-path", Input).value
 
+            if suwayomi_url:
+                self._settings.suwayomi_url = suwayomi_url
             if direction:
                 self._settings.reading_direction = str(direction)
             if mode:

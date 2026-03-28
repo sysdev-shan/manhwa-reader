@@ -14,6 +14,7 @@ DEFAULTS: dict = {
     "image_quality": "standard",         # data_saver | standard | original
     "download_path": str(DATA_DIR / "downloads"),
     "theme": "dark",
+    "suwayomi_url": "http://localhost:4567",
 }
 
 
@@ -79,6 +80,14 @@ class Settings:
     @download_path.setter
     def download_path(self, v: str) -> None:
         self.set("download_path", v)
+
+    @property
+    def suwayomi_url(self) -> str:
+        return self._data["suwayomi_url"]
+
+    @suwayomi_url.setter
+    def suwayomi_url(self, v: str) -> None:
+        self.set("suwayomi_url", v)
 
     def clear_history(self) -> None:
         from .history import History

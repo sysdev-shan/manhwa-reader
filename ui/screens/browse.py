@@ -2,6 +2,10 @@
 Browse / Explore screen.
 
 Tabs: Popular | Latest | Search
+
+The source bar at the top shows the active Suwayomi source and lets the user
+change it at any time via the [Change Source] button (or the `s` key).
+If no source has been selected yet the picker is shown automatically on mount.
 """
 from __future__ import annotations
 
@@ -57,12 +61,25 @@ class BrowseScreen(Screen):
     BINDINGS = [
         Binding("escape,q", "go_back", "Back"),
         Binding("r", "refresh", "Refresh"),
+        Binding("s", "change_source", "Change Source"),
     ]
 
     DEFAULT_CSS = """
     BrowseScreen {
         layout: vertical;
     }
+    #source-bar {
+        height: 3;
+        layout: horizontal;
+        align: center middle;
+        background: $panel-darken-1;
+        padding: 0 1;
+    }
+    #source-bar Label {
+        width: 1fr;
+        color: $text;
+    }
+    #source-bar Button { min-width: 18; }
     #browse-content {
         height: 1fr;
         layout: horizontal;
@@ -113,6 +130,11 @@ class BrowseScreen(Screen):
         self._filters = source.get_filter_list()
 
     def compose(self) -> ComposeResult:
+        # Source bar — always visible; "Change Source" only meaningful for Suwayomi
+        with Horizontal(id="source-bar"):
+            yield Label("🔌 Source: —", id="lbl-source-name")
+            yield Button("Change Source", id="btn-change-source", variant="primary")
+
         with TabbedContent(id="browse-tabs"):
             with TabPane("Popular", id="tab-popular"):
                 yield ListView(id="list-popular")
@@ -138,9 +160,66 @@ class BrowseScreen(Screen):
             yield Button("Next ►", id="btn-next-page", variant="default")
 
     async def on_mount(self) -> None:
+        self._update_source_label()
+        from source_api.sources.suwayomi import SuwayomiSource
+        if isinstance(self.source, SuwayomiSource) and not self.source.source_id:
+            # No source selected yet — show the picker after mount completes
+            self.call_later(self._show_source_picker)
+        else:
+            self._load_popular()
+            self._load_latest()
+
+    # ------------------------------------------------------------------
+    # Source management
+    # ------------------------------------------------------------------
+    def _update_source_label(self) -> None:
+        try:
+            name = getattr(self.source, "name", "Unknown")
+            self.query_one("#lbl-source-name", Label).update(
+                f"🔌 Source: {name}"
+            )
+        except Exception:
+            pass
+
+    def _show_source_picker(self) -> None:
+        from source_api.sources.suwayomi import SuwayomiSource
+        from ui.screens.source_select import SourcePickerScreen
+        if isinstance(self.source, SuwayomiSource):
+            self.app.push_screen(
+                SourcePickerScreen(self.source),
+                callback=self._on_source_picked,
+            )
+
+    def _on_source_picked(self, source_id: str | None) -> None:
+        if source_id:
+            # _activate_source is a @work method; _load_popular/_load_latest
+            # are called from WITHIN the worker after activate_source() awaits,
+            # so they run only once the source is fully activated.
+            self._activate_source(source_id)
+        else:
+            # Cancelled — try anyway (will show "no source" error gracefully)
+            self._load_popular()
+            self._load_latest()
+
+    @work
+    async def _activate_source(self, source_id: str) -> None:
+        from source_api.sources.suwayomi import SuwayomiSource
+        if not isinstance(self.source, SuwayomiSource):
+            return
+        try:
+            await self.source.activate_source(source_id)
+        except Exception as exc:
+            self.notify(f"Could not activate source: {exc}", severity="error")
+            return
+        self._update_source_label()
         self._load_popular()
         self._load_latest()
 
+    def action_change_source(self) -> None:
+        self._show_source_picker()
+
+    # ------------------------------------------------------------------
+    # Workers
     # ------------------------------------------------------------------
     @work(exclusive=True, group="popular")
     async def _load_popular(self) -> None:
@@ -190,7 +269,9 @@ class BrowseScreen(Screen):
     # ------------------------------------------------------------------
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
-        if bid == "btn-search":
+        if bid == "btn-change-source":
+            self._show_source_picker()
+        elif bid == "btn-search":
             self._query = self.query_one("#search-input", Input).value
             self._page = 1
             self._do_search()
