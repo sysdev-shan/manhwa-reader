@@ -6,6 +6,7 @@ from .flame import (
     LuminousScansSource,
     NightScansSource,
     CosmicScansSource,
+    ReaperScansSource,
 )
 
 # Registry of all built-in sources.  Browse screen uses this to populate
@@ -13,6 +14,7 @@ from .flame import (
 SOURCES: dict[str, type] = {
     "Asura Scans": AsuraScansSource,
     "Flame Comics": FlameComicsSource,
+    "Reaper Scans": ReaperScansSource,
     "Luminous Scans": LuminousScansSource,
     "Night Scans": NightScansSource,
     "Cosmic Scans": CosmicScansSource,
@@ -26,5 +28,6 @@ __all__ = [
     "LuminousScansSource",
     "NightScansSource",
     "CosmicScansSource",
+    "ReaperScansSource",
     "SOURCES",
 ]

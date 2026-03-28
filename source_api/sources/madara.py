@@ -1,10 +1,12 @@
 """
 Generic scraper for WordPress sites that use the **Madara** manga theme.
 
-Many popular scanlation and aggregator sites share this theme and expose the
-same `wp-admin/admin-ajax.php` endpoints.  Subclass `MadaraSource`, set
-`BASE_URL` (and optionally `MANGA_URL_PATH`, `DATE_FORMAT`, etc.) and the
-source works without extra code.
+Subclass `MadaraSource`, set `BASE_URL` (and optionally `MANGA_URL_PATH`,
+`DATE_FORMAT`, etc.) and the source works without extra code.
+
+**No admin-ajax.php dependency** — this scraper uses only plain GET requests
+to the public HTML pages, so it works on every Madara site regardless of
+server configuration.
 
 Sites using Madara (examples):
   - Flame Comics   — https://flamecomics.xyz
@@ -48,8 +50,18 @@ _HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Referer": "",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
 }
+
+# Selectors that cover all known Madara versions
+_MANGA_ITEM_SEL = (
+    "div.page-item-detail, "
+    "div.c-image-hover, "
+    "div.manga-item, "
+    "div.bs, "
+    "div.bsx"
+)
 
 
 class MadaraSource(HttpSource):
@@ -62,11 +74,9 @@ class MadaraSource(HttpSource):
 
     Optional overrides
     ------------------
-    MANGA_URL_PATH  : path segment between BASE_URL and the manga slug
-                      (default: "manga")
+    MANGA_URL_PATH  : path segment used in manga URLs  (default: "manga")
     DATE_FORMAT     : strptime format string for chapter dates
                       (default: "%B %d, %Y")
-    POSTS_PER_PAGE  : how many manga to request per page (default 20)
     SOURCE_NAME     : human-readable label (default: class name)
     SOURCE_LANG     : ISO-639-1 language code (default: "en")
     """
@@ -74,7 +84,6 @@ class MadaraSource(HttpSource):
     BASE_URL: ClassVar[str]  # must be set by subclass
     MANGA_URL_PATH: ClassVar[str] = "manga"
     DATE_FORMAT: ClassVar[str] = "%B %d, %Y"
-    POSTS_PER_PAGE: ClassVar[int] = 20
     SOURCE_NAME: ClassVar[str] = ""
     SOURCE_LANG: ClassVar[str] = "en"
 
@@ -107,127 +116,128 @@ class MadaraSource(HttpSource):
     def _headers(self) -> dict:
         return {**_HEADERS, "Referer": self.BASE_URL + "/"}
 
-    async def _get_soup(self, url: str, **params) -> BeautifulSoup:
+    async def _get(self, url: str, **params) -> httpx.Response:
         async with httpx.AsyncClient(
             headers=self._headers(), timeout=30.0, follow_redirects=True
         ) as client:
             resp = await client.get(url, params=params or None)
             resp.raise_for_status()
-            return BeautifulSoup(resp.text, "html.parser")
+            return resp
 
-    async def _ajax_post(self, data: dict) -> str:
-        url = f"{self.BASE_URL}/wp-admin/admin-ajax.php"
+    async def _get_soup(self, url: str, **params) -> BeautifulSoup:
+        resp = await self._get(url, **params)
+        return BeautifulSoup(resp.text, "html.parser")
+
+    async def _post(self, url: str, data: dict) -> httpx.Response:
         async with httpx.AsyncClient(
             headers=self._headers(), timeout=30.0, follow_redirects=True
         ) as client:
             resp = await client.post(url, data=data)
             resp.raise_for_status()
-            text = resp.text
-            # admin-ajax may return JSON {"success": true, "data": "<html>"}
-            if text.startswith("{"):
-                import json
-                try:
-                    payload = json.loads(text)
-                    return payload.get("data", text)
-                except Exception:
-                    pass
-            return text
+            return resp
+
+    # ------------------------------------------------------------------
+    # Manga list URL builders
+    # ------------------------------------------------------------------
+    def _list_url(self, page: int) -> str:
+        """Build the manga listing URL for a given page number."""
+        if page > 1:
+            return f"{self.BASE_URL}/{self.MANGA_URL_PATH}/page/{page}/"
+        return f"{self.BASE_URL}/{self.MANGA_URL_PATH}/"
 
     # ------------------------------------------------------------------
     # HTML parsers
     # ------------------------------------------------------------------
-    def _parse_manga_list(self, html: str) -> list[SManga]:
-        """Parse manga from an admin-ajax HTML fragment."""
-        soup = BeautifulSoup(html, "html.parser")
+    def _parse_manga_page(self, soup: BeautifulSoup) -> MangasPage:
+        """Parse manga entries from a browse/listing HTML page."""
         items: list[SManga] = []
-        for item in soup.select("div.page-item-detail, div.c-image-hover"):
-            link = item.find("a", href=True)
-            if not link:
-                continue
-            url = str(link["href"]).rstrip("/").split("/")[-1]
-            title = link.get("title") or ""
-            # Try heading
-            h = item.find(["h3", "h5", "h4"])
-            if h and h.get_text(strip=True):
-                title = h.get_text(strip=True)
-            img = item.find("img")
-            thumb: str | None = None
-            if img:
-                thumb = (
-                    str(img.get("data-src", ""))
-                    or str(img.get("src", ""))
-                    or None
-                )
-            if url and title:
-                items.append(SManga(url=url, title=title, thumbnail_url=thumb or None))
-        return items
+        for entry in soup.select(_MANGA_ITEM_SEL):
+            manga = self._manga_from_entry(entry)
+            if manga:
+                items.append(manga)
+
+        has_next = bool(
+            soup.select_one("a.next.page-numbers, .nav-links .next, .navigation-ajax .next")
+        )
+        return MangasPage(mangas=items, has_next_page=has_next)
+
+    def _manga_from_entry(self, entry: Tag) -> SManga | None:
+        """Extract an SManga from a listing card element."""
+        # Find the primary link — prefer one with a title attribute
+        link = entry.select_one("a[title]") or entry.find("a", href=True)
+        if not link or not isinstance(link, Tag):
+            return None
+
+        href = str(link.get("href", "")).rstrip("/")
+        if not href:
+            return None
+
+        # Derive slug: last non-empty path segment after the manga URL path
+        href_parts = [p for p in href.split("/") if p]
+        slug = href_parts[-1] if href_parts else ""
+        if not slug:
+            return None
+
+        # Title: prefer title attribute, then heading text
+        title = str(link.get("title", "")).strip()
+        for tag in ("h3", "h5", "h4", "h2", "h1"):
+            h = entry.find(tag)
+            if h:
+                t = h.get_text(strip=True)
+                if t:
+                    title = t
+                    break
+        if not title:
+            title = link.get_text(strip=True)
+        if not title:
+            return None
+
+        # Thumbnail
+        img = entry.find("img")
+        thumb: str | None = None
+        if isinstance(img, Tag):
+            thumb = (
+                str(img.get("data-src", "")).strip()
+                or str(img.get("data-lazy-src", "")).strip()
+                or str(img.get("src", "")).strip()
+                or None
+            )
+
+        return SManga(url=slug, title=title, thumbnail_url=thumb or None)
 
     # ------------------------------------------------------------------
     # CatalogueSource: manga lists
     # ------------------------------------------------------------------
     async def get_popular_manga(self, page: int) -> MangasPage:
-        html = await self._ajax_post(
-            {
-                "action": "madara_load_more",
-                "template": "madara-core/content/content-archive-manga",
-                "vars[orderby]": "meta_value_num",
-                "vars[meta_key]": "_wp_manga_views",
-                "vars[paged]": page - 1,
-                "vars[posts_per_page]": self.POSTS_PER_PAGE,
-                "vars[post_type]": "wp-manga",
-                "vars[post_status]": "publish",
-                "vars[template]": "archive-manga",
-                "vars[sidebar]": "full",
-            }
-        )
-        mangas = self._parse_manga_list(html)
-        return MangasPage(mangas=mangas, has_next_page=len(mangas) >= self.POSTS_PER_PAGE)
+        """Fetch the most-viewed manga listing page directly (no admin-ajax)."""
+        url = self._list_url(page)
+        soup = await self._get_soup(url, m_orderby="views")
+        return self._parse_manga_page(soup)
 
     async def get_latest_updates(self, page: int) -> MangasPage:
-        html = await self._ajax_post(
-            {
-                "action": "madara_load_more",
-                "template": "madara-core/content/content-archive-manga",
-                "vars[orderby]": "date",
-                "vars[order]": "DESC",
-                "vars[paged]": page - 1,
-                "vars[posts_per_page]": self.POSTS_PER_PAGE,
-                "vars[post_type]": "wp-manga",
-                "vars[post_status]": "publish",
-                "vars[template]": "archive-manga",
-                "vars[sidebar]": "full",
-            }
-        )
-        mangas = self._parse_manga_list(html)
-        return MangasPage(mangas=mangas, has_next_page=len(mangas) >= self.POSTS_PER_PAGE)
+        """Fetch the latest-updated manga listing page directly (no admin-ajax)."""
+        url = self._list_url(page)
+        soup = await self._get_soup(url, m_orderby="latest")
+        return self._parse_manga_page(soup)
 
     async def get_search_manga(
         self, page: int, query: str, filters: FilterList
     ) -> MangasPage:
+        """Search via WordPress ?s= parameter (no admin-ajax)."""
         url = f"{self.BASE_URL}/"
-        params: dict = {
-            "s": query,
-            "post_type": "wp-manga",
-            "paged": page,
-        }
-        soup = await self._get_soup(url, **params)
+        if page > 1:
+            url = f"{self.BASE_URL}/page/{page}/"
+        soup = await self._get_soup(url, s=query, post_type="wp-manga")
+
+        # Search results use a different layout than the listing pages
         items: list[SManga] = []
-        for item in soup.select("div.c-tabs-item__content, div.page-item-detail"):
-            link = item.find("a", href=True)
-            if not link:
-                continue
-            href = str(link["href"]).rstrip("/")
-            url_slug = href.split("/")[-1]
-            title = link.get("title") or ""
-            h = item.find(["h3", "h5", "h4", "h2"])
-            if h:
-                title = h.get_text(strip=True) or title
-            img = item.find("img")
-            thumb: str | None = None
-            if img:
-                thumb = str(img.get("data-src", "")) or str(img.get("src", "")) or None
-            if url_slug and title:
-                items.append(SManga(url=url_slug, title=title, thumbnail_url=thumb or None))
+        for entry in soup.select(
+            "div.c-tabs-item__content, div.page-item-detail, "
+            "div.c-image-hover, div.bs, div.bsx"
+        ):
+            manga = self._manga_from_entry(entry)
+            if manga:
+                items.append(manga)
 
         has_next = bool(soup.select_one("a.next.page-numbers"))
         return MangasPage(mangas=items, has_next_page=has_next)
@@ -249,8 +259,12 @@ class MadaraSource(HttpSource):
         # Thumbnail
         img_el = soup.select_one("div.summary-image img, div.tab-summary img")
         thumb: str | None = None
-        if img_el:
-            thumb = str(img_el.get("data-src", "")) or str(img_el.get("src", "")) or None
+        if isinstance(img_el, Tag):
+            thumb = (
+                str(img_el.get("data-src", "")).strip()
+                or str(img_el.get("src", "")).strip()
+                or None
+            )
 
         # Meta: author, artist, genres, status
         author: str | None = None
@@ -296,55 +310,69 @@ class MadaraSource(HttpSource):
     # Source: chapters
     # ------------------------------------------------------------------
     async def get_chapter_list(self, manga: SManga) -> list[SChapter]:
-        # First we need the WordPress post ID from the manga page
+        """
+        Fetch the chapter list using a three-step strategy:
+
+        1. POST to ``{manga_url}ajax/chapters/``  (modern Madara pattern,
+           avoids wp-admin completely)
+        2. Parse chapters that are already embedded in the manga detail page
+           HTML (some Madara configs render all chapters server-side)
+        3. Return empty list if both fail.
+        """
         manga_url = f"{self.BASE_URL}/{self.MANGA_URL_PATH}/{manga.url}/"
         soup = await self._get_soup(manga_url)
 
-        post_id: str | None = None
-        holder = soup.find(id="manga-chapters-holder")
-        if isinstance(holder, Tag):
-            post_id = str(holder.get("data-id") or "") or None
-
-        if not post_id:
-            # Fallback: look for nonce in page data
-            match = re.search(r'"mangaId"\s*:\s*"?(\d+)"?', soup.text)
-            if match:
-                post_id = match.group(1)
-
-        if post_id:
-            html = await self._ajax_post(
-                {
-                    "action": "manga_get_chapters",
-                    "manga": post_id,
-                }
+        # --- Strategy 1: POST to the per-manga ajax/chapters/ endpoint ---
+        ajax_url = manga_url.rstrip("/") + "/ajax/chapters/"
+        try:
+            resp = await self._post(
+                ajax_url,
+                data={
+                    # Some Madara configs need a nonce; try without first
+                },
             )
-        else:
-            # Last resort: chapter list is already in the page HTML
-            html = str(soup)
+            chapters = self._parse_chapter_list(resp.text, manga_url)
+            if chapters:
+                return chapters
+        except (httpx.HTTPStatusError, httpx.RequestError):
+            pass  # fall through to next strategy
 
-        return self._parse_chapter_list(html, manga_url)
+        # --- Strategy 2: chapters embedded directly in the detail page ---
+        chapters = self._parse_chapter_list(str(soup), manga_url)
+        if chapters:
+            return chapters
+
+        return []
 
     def _parse_chapter_list(self, html: str, manga_url: str) -> list[SChapter]:
         soup = BeautifulSoup(html, "html.parser")
         chapters: list[SChapter] = []
         for li in soup.select("li.wp-manga-chapter, li.a-h"):
             link = li.find("a", href=True)
-            if not link:
+            if not isinstance(link, Tag):
                 continue
-            href = str(link["href"]).rstrip("/")
+            href = str(link.get("href", "")).rstrip("/")
             ch_name = link.get_text(strip=True)
-            ch_url = href  # full URL stored; get_page_list uses it directly
+            ch_url = href  # full absolute URL
 
             # Date
             ts = 0
-            date_el = li.select_one("span.chapter-release-date i, span.chapter-release-date a")
+            date_el = li.select_one(
+                "span.chapter-release-date i, span.chapter-release-date a"
+            )
             if date_el:
                 date_str = date_el.get_text(strip=True)
-                try:
-                    dt = datetime.strptime(date_str, self.DATE_FORMAT)
-                    ts = int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
-                except ValueError:
-                    pass
+                # Build a deduplicated list of formats to try
+                _default = "%B %d, %Y"
+                _fmts = [self.DATE_FORMAT] if self.DATE_FORMAT != _default else []
+                _fmts += [_default, "%d/%m/%Y", "%Y-%m-%d"]
+                for fmt in _fmts:
+                    try:
+                        dt = datetime.strptime(date_str, fmt)
+                        ts = int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
+                        break
+                    except ValueError:
+                        continue
 
             # Chapter number
             num = -1.0
@@ -355,9 +383,11 @@ class MadaraSource(HttpSource):
                 except ValueError:
                     pass
 
-            chapters.append(SChapter(url=ch_url, name=ch_name, date_upload=ts, chapter_number=num))
+            chapters.append(
+                SChapter(url=ch_url, name=ch_name, date_upload=ts, chapter_number=num)
+            )
 
-        return chapters  # already newest-first from Madara
+        return chapters  # Madara returns chapters newest-first
 
     # ------------------------------------------------------------------
     # Source: pages
@@ -366,15 +396,12 @@ class MadaraSource(HttpSource):
         """
         Fetch the chapter page and extract image URLs.
         Madara embeds them via: ts_reader.run({"sources":[{"images":["url1",...]}]})
+        Falls back to parsing <img> tags inside the reading container.
         """
-        async with httpx.AsyncClient(
-            headers=self._headers(), timeout=30.0, follow_redirects=True
-        ) as client:
-            resp = await client.get(chapter.url)
-            resp.raise_for_status()
-            html = resp.text
+        resp = await self._get(chapter.url)
+        html = resp.text
 
-        # Try ts_reader pattern first
+        # Try ts_reader pattern first (most common in Madara)
         m = re.search(
             r"ts_reader\.run\s*\(\s*(\{.*?\})\s*\)\s*;",
             html,
@@ -382,29 +409,35 @@ class MadaraSource(HttpSource):
         )
         if m:
             import json
+
             try:
                 data = json.loads(m.group(1))
-                sources = data.get("sources", [])
                 images: list[str] = []
-                for src in sources:
+                for src in data.get("sources", []):
                     images.extend(src.get("images", []))
-                return [Page(index=i, image_url=url) for i, url in enumerate(images)]
+                if images:
+                    return [Page(index=i, image_url=u) for i, u in enumerate(images)]
             except Exception:
                 pass
 
-        # Fallback: find images in #chapter-content or .reading-content
+        # Fallback: <img> tags inside the reading container
         soup = BeautifulSoup(html, "html.parser")
         container = soup.select_one(
             "#chapter-content, .reading-content, .page-break, div.entry-content"
         )
-        if container:
-            imgs = container.find_all("img")
-        else:
+        imgs = container.find_all("img") if container else []
+        if not imgs:
             imgs = soup.find_all("img", src=re.compile(r"wp-content/uploads"))
 
         pages: list[Page] = []
         for i, img in enumerate(imgs):
-            src = str(img.get("data-src", "")) or str(img.get("src", ""))
+            if not isinstance(img, Tag):
+                continue
+            src = (
+                str(img.get("data-src", "")).strip()
+                or str(img.get("data-lazy-src", "")).strip()
+                or str(img.get("src", "")).strip()
+            )
             if src and src.startswith("http"):
-                pages.append(Page(index=i, image_url=src.strip()))
+                pages.append(Page(index=i, image_url=src))
         return pages
