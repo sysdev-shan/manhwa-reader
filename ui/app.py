@@ -9,7 +9,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer, Header
 
-from source_api.sources.suwayomi import SuwayomiSource
+from source_api.sources import SOURCES
+from source_api.base import CatalogueSource
 from core.downloader import Downloader
 from core.settings import Settings
 from ui.screens.home import HomeScreen
@@ -23,7 +24,7 @@ App {
 
 
 class ManhwaReaderApp(App):
-    """Terminal Manhwa / Manhua Reader — powered by Suwayomi / Keiyoushi extensions."""
+    """Terminal Manhwa / Manhua Reader."""
 
     CSS = APP_CSS
 
@@ -36,14 +37,28 @@ class ManhwaReaderApp(App):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        settings = Settings()
-        self._source = SuwayomiSource(base_url=settings.suwayomi_url)
+        self._settings = Settings()
         self._downloader = Downloader()
-        self._settings = settings
+        self._source: CatalogueSource = self._build_source(
+            self._settings.active_source
+        )
+
+    @staticmethod
+    def _build_source(key: str) -> CatalogueSource:
+        """Instantiate the source registered under *key* (falls back to first)."""
+        cls = SOURCES.get(key)
+        if cls is None:
+            cls = next(iter(SOURCES.values()))
+        return cls()
 
     @property
-    def source(self) -> SuwayomiSource:
+    def source(self) -> CatalogueSource:
         return self._source
+
+    def set_source(self, key: str) -> None:
+        """Switch the active source and persist the choice."""
+        self._source = self._build_source(key)
+        self._settings.active_source = key
 
     @property
     def downloader(self) -> Downloader:

@@ -10,6 +10,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Input, Label, Select, Static
 
 from core.settings import Settings
+from source_api.sources import SOURCES
 
 
 class SettingsScreen(Screen):
@@ -52,8 +53,12 @@ class SettingsScreen(Screen):
         yield Static("⚙  Settings", id="settings-header")
 
         with Vertical(classes="settings-row"):
-            yield Label("Suwayomi Server URL")
-            yield Input(value=s.suwayomi_url, id="inp-suwayomi-url")
+            yield Label("Default Source")
+            yield Select(
+                [(name, name) for name in SOURCES],
+                value=s.active_source,
+                id="sel-source",
+            )
 
         with Vertical(classes="settings-row"):
             yield Label("Reading Direction")
@@ -104,14 +109,14 @@ class SettingsScreen(Screen):
 
     def _save(self) -> None:
         try:
-            suwayomi_url = self.query_one("#inp-suwayomi-url", Input).value
+            source_key = self.query_one("#sel-source", Select).value
             direction = self.query_one("#sel-direction", Select).value
             mode = self.query_one("#sel-mode", Select).value
             quality = self.query_one("#sel-quality", Select).value
             dl_path = self.query_one("#inp-dl-path", Input).value
 
-            if suwayomi_url:
-                self._settings.suwayomi_url = suwayomi_url
+            if source_key:
+                self._settings.active_source = str(source_key)
             if direction:
                 self._settings.reading_direction = str(direction)
             if mode:

@@ -14,7 +14,7 @@ DEFAULTS: dict = {
     "image_quality": "standard",         # data_saver | standard | original
     "download_path": str(DATA_DIR / "downloads"),
     "theme": "dark",
-    "suwayomi_url": "http://localhost:4567",
+    "active_source": "Asura Scans",      # key from source_api.sources.SOURCES
 }
 
 
@@ -82,12 +82,12 @@ class Settings:
         self.set("download_path", v)
 
     @property
-    def suwayomi_url(self) -> str:
-        return self._data["suwayomi_url"]
+    def active_source(self) -> str:
+        return self._data["active_source"]
 
-    @suwayomi_url.setter
-    def suwayomi_url(self, v: str) -> None:
-        self.set("suwayomi_url", v)
+    @active_source.setter
+    def active_source(self, v: str) -> None:
+        self.set("active_source", v)
 
     def clear_history(self) -> None:
         from .history import History

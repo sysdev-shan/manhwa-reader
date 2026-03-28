@@ -1,19 +1,19 @@
 """
 Source picker modal screen.
 
-Shows all sources installed on the connected Suwayomi-Server and lets the user
-select one.  Dismissed with the selected source ID (str) or None if cancelled.
+Shows all built-in manga sources (Asura Scans, Flame Comics, etc.) and lets
+the user select one.  Dismissed with the selected source key (str) or None if
+cancelled.  No external server required.
 """
 from __future__ import annotations
 
-from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Label, ListItem, ListView, LoadingIndicator, Static
+from textual.widgets import Button, Label, ListItem, ListView, Static
 
-from source_api.sources.suwayomi import SuwayomiSource
+from source_api.sources import SOURCES
 
 
 class SourceItem(ListItem):
@@ -25,25 +25,25 @@ class SourceItem(ListItem):
     SourceItem .src-meta { color: $text-muted; }
     """
 
-    def __init__(self, meta: dict, **kwargs) -> None:
+    def __init__(self, key: str, source_cls: type, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.meta = meta
+        self.source_key = key
+        self._source_cls = source_cls
 
     def compose(self) -> ComposeResult:
-        name = self.meta.get("displayName") or self.meta.get("name", "Unknown")
-        lang = self.meta.get("lang", "?").upper()
-        nsfw = "  🔞" if self.meta.get("isNsfw") else ""
-        yield Label(f"{name}{nsfw}", classes="src-name")
+        instance = self._source_cls()
+        lang = getattr(instance, "lang", "en").upper()
+        yield Label(self.source_key, classes="src-name")
         yield Label(f"[{lang}]", classes="src-meta")
 
 
 class SourcePickerScreen(ModalScreen):
     """
-    Modal overlay for selecting a Suwayomi source.
+    Modal overlay for selecting a manga source.
 
-    Dismissed with the selected source ID string, or None if cancelled.
-    Use ``push_screen(SourcePickerScreen(src), callback=cb)`` — the callback
-    receives ``str | None``.
+    Dismissed with the selected source key (str from SOURCES dict), or None
+    if cancelled.  Use ``push_screen(SourcePickerScreen(), callback=cb)`` —
+    the callback receives ``str | None``.
     """
 
     BINDINGS = [Binding("escape,q", "cancel_pick", "Cancel")]
@@ -53,107 +53,46 @@ class SourcePickerScreen(ModalScreen):
         align: center middle;
     }
     #src-dialog {
-        width: 72;
-        height: 36;
+        width: 60;
+        height: auto;
+        max-height: 28;
         border: thick $primary;
         background: $surface;
         padding: 1 2;
     }
     #src-dialog-header {
-        height: 2;
+        height: 3;
         content-align: center middle;
         text-style: bold;
         color: $text;
         background: $panel;
         margin-bottom: 1;
     }
-    #src-status {
-        height: 3;
-        color: $error;
-        content-align: left middle;
-        display: none;
-    }
-    #src-status.visible { display: block; }
-    #src-list { height: 1fr; }
-    #src-setup-hint {
-        height: auto;
-        color: $text-muted;
-        margin-top: 1;
-        display: none;
-    }
-    #src-setup-hint.visible { display: block; }
+    #src-list { height: 1fr; min-height: 10; }
     #btn-src-cancel {
         margin-top: 1;
         width: 100%;
     }
     """
 
-    def __init__(self, suwayomi: SuwayomiSource, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._suwayomi = suwayomi
-
     def compose(self) -> ComposeResult:
         with Vertical(id="src-dialog"):
-            yield Static("🔌  Select a Source", id="src-dialog-header")
-            yield LoadingIndicator(id="src-loading")
-            yield Static("", id="src-status")
+            yield Static("📚  Select a Source", id="src-dialog-header")
             yield ListView(id="src-list")
-            yield Static(
-                "💡  Setup: run Suwayomi-Server, go to Extensions → install "
-                "Keiyoushi repo → install sources.",
-                id="src-setup-hint",
-            )
             yield Button("Cancel", id="btn-src-cancel", variant="default")
 
     async def on_mount(self) -> None:
-        self._fetch_sources()
-
-    # ------------------------------------------------------------------
-    @work
-    async def _fetch_sources(self) -> None:
-        try:
-            sources = await self._suwayomi.list_sources()
-        except Exception as exc:
-            self._show_error(
-                f"Cannot reach Suwayomi at {self._suwayomi.base_url}: {exc}"
-            )
-            return
-
-        if not sources:
-            self._show_error(
-                "No sources installed on the Suwayomi server.\n"
-                "Install extensions via the Suwayomi web UI."
-            )
-            return
-
-        self._populate(sources)
-
-    def _show_error(self, message: str) -> None:
-        try:
-            self.query_one("#src-loading").display = False
-            status = self.query_one("#src-status", Static)
-            status.update(f"⚠  {message}")
-            status.add_class("visible")
-            self.query_one("#src-setup-hint").add_class("visible")
-        except Exception:
-            pass
-
-    def _populate(self, sources: list[dict]) -> None:
-        try:
-            self.query_one("#src-loading").display = False
-            lv = self.query_one("#src-list", ListView)
-            lv.clear()
-            for s in sources:
-                lv.append(SourceItem(s))
-        except Exception:
-            pass
+        # Populate list after mount so the widget tree is ready
+        lv = self.query_one("#src-list", ListView)
+        lv.clear()
+        for key, cls in SOURCES.items():
+            lv.append(SourceItem(key, cls))
 
     # ------------------------------------------------------------------
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         if isinstance(event.item, SourceItem):
-            source_id = str(event.item.meta.get("id", ""))
-            # Dismiss with the ID if it's truthy; None signals no valid selection
-            self.dismiss(source_id if source_id else None)
+            key = event.item.source_key
+            self.dismiss(key if key else None)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-src-cancel":

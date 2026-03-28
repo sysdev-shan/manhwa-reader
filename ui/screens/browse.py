@@ -3,16 +3,15 @@ Browse / Explore screen.
 
 Tabs: Popular | Latest | Search
 
-The source bar at the top shows the active Suwayomi source and lets the user
-change it at any time via the [Change Source] button (or the `s` key).
-If no source has been selected yet the picker is shown automatically on mount.
+The source bar at the top shows the active source name and lets the user
+change it via [Change Source] or the `s` key.
 """
 from __future__ import annotations
 
-from textual import on, work
+from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, ScrollableContainer
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import (
     Button,
@@ -26,21 +25,21 @@ from textual.widgets import (
     TabPane,
 )
 
+from source_api.base import CatalogueSource
 from source_api.models import SManga, MangasPage
 from ui.widgets.filter_panel import FilterPanel
 
 
+# ---------------------------------------------------------------------------
+# Helper widget — one row in a manga list
+# ---------------------------------------------------------------------------
 class MangaListItem(ListItem):
-    """One row in a manga list."""
+    """A manga entry in a browse list."""
 
     DEFAULT_CSS = """
-    MangaListItem {
-        height: 4;
-        padding: 0 1;
-    }
-    MangaListItem Label { width: 1fr; }
-    MangaListItem .item-title { text-style: bold; }
-    MangaListItem .item-meta { color: $text-muted; }
+    MangaListItem { height: 3; padding: 0 1; }
+    MangaListItem .manga-title { text-style: bold; }
+    MangaListItem .manga-status { color: $text-muted; }
     """
 
     def __init__(self, manga: SManga, **kwargs) -> None:
@@ -48,15 +47,15 @@ class MangaListItem(ListItem):
         self.manga = manga
 
     def compose(self) -> ComposeResult:
-        yield Label(self.manga.title, classes="item-title")
-        yield Label(
-            f"{self.manga.status_label()}  •  {self.manga.author or ''}",
-            classes="item-meta",
-        )
+        yield Label(self.manga.title, classes="manga-title")
+        yield Label(self.manga.status_label(), classes="manga-status")
 
 
+# ---------------------------------------------------------------------------
+# Browse screen
+# ---------------------------------------------------------------------------
 class BrowseScreen(Screen):
-    """Browse popular/latest/search tabs."""
+    """Browse popular / latest / search tabs with source switching."""
 
     BINDINGS = [
         Binding("escape,q", "go_back", "Back"),
@@ -65,9 +64,7 @@ class BrowseScreen(Screen):
     ]
 
     DEFAULT_CSS = """
-    BrowseScreen {
-        layout: vertical;
-    }
+    BrowseScreen { layout: vertical; }
     #source-bar {
         height: 3;
         layout: horizontal;
@@ -75,27 +72,19 @@ class BrowseScreen(Screen):
         background: $panel-darken-1;
         padding: 0 1;
     }
-    #source-bar Label {
-        width: 1fr;
-        color: $text;
-    }
+    #source-bar Label { width: 1fr; color: $text; }
     #source-bar Button { min-width: 18; }
     #browse-content {
         height: 1fr;
         layout: horizontal;
     }
-    #manga-list-pane {
-        width: 1fr;
-        height: 1fr;
-    }
+    #manga-list-pane { width: 1fr; height: 1fr; }
     #filter-pane {
         width: 32;
         height: 1fr;
         display: none;
     }
-    #filter-pane.visible {
-        display: block;
-    }
+    #filter-pane.visible { display: block; }
     #search-bar {
         height: 3;
         layout: horizontal;
@@ -120,9 +109,9 @@ class BrowseScreen(Screen):
     }
     """
 
-    def __init__(self, source, **kwargs) -> None:
+    def __init__(self, source: CatalogueSource, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.source = source
+        self._source = source
         self._page = 1
         self._has_next = False
         self._current_tab = "popular"
@@ -130,9 +119,8 @@ class BrowseScreen(Screen):
         self._filters = source.get_filter_list()
 
     def compose(self) -> ComposeResult:
-        # Source bar — always visible; "Change Source" only meaningful for Suwayomi
         with Horizontal(id="source-bar"):
-            yield Label("🔌 Source: —", id="lbl-source-name")
+            yield Label(f"📚 Source: {self._source.name}", id="lbl-source-name")
             yield Button("Change Source", id="btn-change-source", variant="primary")
 
         with TabbedContent(id="browse-tabs"):
@@ -142,10 +130,7 @@ class BrowseScreen(Screen):
                 yield ListView(id="list-latest")
             with TabPane("Search", id="tab-search"):
                 with Horizontal(id="search-bar"):
-                    yield Input(
-                        placeholder="Search manhwa / manhua…",
-                        id="search-input",
-                    )
+                    yield Input(placeholder="Search manhwa…", id="search-input")
                     yield Button("Search", id="btn-search", variant="primary")
                     yield Button("Filters", id="btn-filter", variant="default")
                 with Horizontal(id="browse-content"):
@@ -160,63 +145,35 @@ class BrowseScreen(Screen):
             yield Button("Next ►", id="btn-next-page", variant="default")
 
     async def on_mount(self) -> None:
-        self._update_source_label()
-        from source_api.sources.suwayomi import SuwayomiSource
-        if isinstance(self.source, SuwayomiSource) and not self.source.source_id:
-            # No source selected yet — show the picker after mount completes
-            self.call_later(self._show_source_picker)
-        else:
-            self._load_popular()
-            self._load_latest()
-
-    # ------------------------------------------------------------------
-    # Source management
-    # ------------------------------------------------------------------
-    def _update_source_label(self) -> None:
-        try:
-            name = getattr(self.source, "name", "Unknown")
-            self.query_one("#lbl-source-name", Label).update(
-                f"🔌 Source: {name}"
-            )
-        except Exception:
-            pass
-
-    def _show_source_picker(self) -> None:
-        from source_api.sources.suwayomi import SuwayomiSource
-        from ui.screens.source_select import SourcePickerScreen
-        if isinstance(self.source, SuwayomiSource):
-            self.app.push_screen(
-                SourcePickerScreen(self.source),
-                callback=self._on_source_picked,
-            )
-
-    def _on_source_picked(self, source_id: str | None) -> None:
-        if source_id:
-            # _activate_source is a @work method; _load_popular/_load_latest
-            # are called from WITHIN the worker after activate_source() awaits,
-            # so they run only once the source is fully activated.
-            self._activate_source(source_id)
-        else:
-            # Cancelled — try anyway (will show "no source" error gracefully)
-            self._load_popular()
-            self._load_latest()
-
-    @work
-    async def _activate_source(self, source_id: str) -> None:
-        from source_api.sources.suwayomi import SuwayomiSource
-        if not isinstance(self.source, SuwayomiSource):
-            return
-        try:
-            await self.source.activate_source(source_id)
-        except Exception as exc:
-            self.notify(f"Could not activate source: {exc}", severity="error")
-            return
-        self._update_source_label()
         self._load_popular()
         self._load_latest()
 
+    # ------------------------------------------------------------------
+    # Source switching
+    # ------------------------------------------------------------------
     def action_change_source(self) -> None:
-        self._show_source_picker()
+        from ui.screens.source_select import SourcePickerScreen
+        self.app.push_screen(SourcePickerScreen(), callback=self._on_source_picked)
+
+    def _on_source_picked(self, source_key: str | None) -> None:
+        if not source_key:
+            return
+        # Persist the choice and update the local reference
+        self.app.set_source(source_key)
+        self._source = self.app.source
+        self._filters = self._source.get_filter_list()
+        self._update_source_label()
+        self._page = 1
+        self._load_popular()
+        self._load_latest()
+
+    def _update_source_label(self) -> None:
+        try:
+            self.query_one("#lbl-source-name", Label).update(
+                f"📚 Source: {self._source.name}"
+            )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Workers
@@ -225,7 +182,7 @@ class BrowseScreen(Screen):
     async def _load_popular(self) -> None:
         self._set_loading(True)
         try:
-            result: MangasPage = await self.source.get_popular_manga(self._page)
+            result: MangasPage = await self._source.get_popular_manga(self._page)
             lv = self.query_one("#list-popular", ListView)
             lv.clear()
             for manga in result.mangas:
@@ -240,7 +197,7 @@ class BrowseScreen(Screen):
     @work(exclusive=True, group="latest")
     async def _load_latest(self) -> None:
         try:
-            result: MangasPage = await self.source.get_latest_updates(self._page)
+            result: MangasPage = await self._source.get_latest_updates(self._page)
             lv = self.query_one("#list-latest", ListView)
             lv.clear()
             for manga in result.mangas:
@@ -252,7 +209,7 @@ class BrowseScreen(Screen):
     async def _do_search(self) -> None:
         self._set_loading(True)
         try:
-            result: MangasPage = await self.source.get_search_manga(
+            result: MangasPage = await self._source.get_search_manga(
                 self._page, self._query, self._filters
             )
             lv = self.query_one("#list-search", ListView)
@@ -267,10 +224,12 @@ class BrowseScreen(Screen):
             self._set_loading(False)
 
     # ------------------------------------------------------------------
+    # Event handlers
+    # ------------------------------------------------------------------
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
         if bid == "btn-change-source":
-            self._show_source_picker()
+            self.action_change_source()
         elif bid == "btn-search":
             self._query = self.query_one("#search-input", Input).value
             self._page = 1
@@ -310,9 +269,11 @@ class BrowseScreen(Screen):
             self._open_detail(event.item.manga)
 
     # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
     def _open_detail(self, manga: SManga) -> None:
         from ui.screens.manga_detail import MangaDetailScreen
-        self.app.push_screen(MangaDetailScreen(manga=manga, source=self.source))
+        self.app.push_screen(MangaDetailScreen(manga=manga, source=self._source))
 
     def _refresh_current_tab(self) -> None:
         if self._current_tab == "popular":
